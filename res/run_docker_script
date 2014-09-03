@@ -1,0 +1,58 @@
+#!/bin/bash
+
+set -e
+
+if [[ $# -ne 1 ]]; then
+	echo "Usage: $0 <script>"
+	exit 1
+fi
+
+IMAGE="ayufan/travis-linux-worker"
+IMAGE_USER="travis"
+
+case "$CI_LANGUAGE" in
+    android|php|staging|perl|node-js|python|jvm|haskell|go|erlang|ruby)
+        IMAGE_TAG="$CI_LANGUAGE"
+        ;;
+
+    *)
+        IMAGE_TAG="standard"
+        ;;
+esac
+
+stop_docker() {
+	docker kill $id 1>/dev/null 2>/dev/null
+	docker rm -f $id 1>/dev/null 2>/dev/null
+}
+
+echo "Bootstraping new container for $IMAGE_TAG..."
+id=$(docker run -P -d "$IMAGE:$IMAGE_TAG" /sbin/init)
+trap stop_docker EXIT
+echo "New container bootstrapped: $id."
+
+IP="$(docker inspect --format '{{ .NetworkSettings.IPAddress }}' $id)"
+PORT="22"
+SSH_COMMAND="sshpass -p travis ssh -t -p $PORT -o ConnectionAttempts=10 -o ConnectTimeout=10 -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no"
+SSH_LOGIN="travis@$IP"
+
+wait_for_ssh() {
+	for i in $(seq 1 10)
+	do
+		$SSH_COMMAND $SSH_LOGIN exit 0 1>/dev/null 2>/dev/null && return 0
+		echo "Waiting for SSH ($i)..."
+		sleep 3s
+	done
+	return 1
+}
+
+echo "Waiting for container boot-up: $IP:$PORT..."
+wait_for_ssh
+
+if [[ "$CI_REPO_SLUG" != "" ]]; then
+	echo "Copying sources..."
+	$SSH_COMMAND $SSH_LOGIN mkdir -p "build/$CI_REPO_SLUG"
+	rsync -a -e "$SSH_COMMAND" . "$SSH_LOGIN:build/$CI_REPO_SLUG"
+fi
+
+echo "Executing build script..."
+$SSH_COMMAND $SSH_LOGIN bash -c "$(cat "$1")"

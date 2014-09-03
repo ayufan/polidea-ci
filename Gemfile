@@ -4,5 +4,8 @@ source 'https://rubygems.org'
 gemspec
 
 gem 'thor'
+gem 'addressable'
+gem 'activesupport'
+gem 'childprocess', '0.3.6'
 gem 'travis-yaml', github: 'travis-ci/travis-yaml'
 gem 'travis-build', github: 'ayufan/travis-build'

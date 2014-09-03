@@ -1,0 +1,29 @@
+#!/bin/bash
+
+set -e
+
+if [[ $# -ne 1 ]]; then
+	echo "Usage: $0 <script>"
+	exit 1
+fi
+
+cp "$1" current_build_script || true
+
+case "$CI_OS" in
+    osx)
+		if which prlctl 2>/dev/null 1>/dev/null
+		then
+			"$(dirname $0)/run_prl_script" "$@"
+		elif which VBoxManage 2>/dev/null 1>/dev/null
+		then
+			"$(dirname $0)/run_virtualbox_script" "$@"
+		else
+			echo "No Virtual Machine provider found!" 1>&2
+			exit 1
+		fi
+        ;;
+
+    *)
+		"$(dirname $0)/run_docker_script" "$@"
+		;;
+esac

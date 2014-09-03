@@ -20,3 +20,5 @@ tmp
 *.o
 *.a
 mkmf.log
+current_build_script
+vendor

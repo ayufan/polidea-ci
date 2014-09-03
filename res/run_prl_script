@@ -1,0 +1,124 @@
+#!/bin/bash
+
+set -e
+
+if [[ $# -ne 1 ]]; then
+	echo "Usage: $0 <script>"
+	exit 1
+fi
+
+if [[ -z "$CI_PROJECT_ID" ]]; then
+	CI_PROJECT_ID=1
+	echo "CI_PROJECT_ID not defined"
+	# exit 1
+fi
+
+BASE_VM="Mavericks"
+BASE_TEMPLATE="Mavericks_Template"
+CUR_VM="${BASE_VM}_project_${CI_PROJECT_ID}"
+CUR_INDEX=$((1000+$CI_PROJECT_ID))
+CUR_SNAPSHOT="Started"
+CUR_USER="travis"
+
+wait_for_vm() {
+	echo -n "VM: Waiting"
+	for i in $(seq 1 60)
+	do
+		if prlctl exec "$CUR_VM" exit 0 1>/dev/null 2>/dev/null
+		then
+			echo ""
+			return 0
+		fi
+		echo -n "."
+		sleep 1s
+	done
+	return 1
+}
+
+pause_vm() {
+	prlctl suspend "$CUR_VM" 2>/dev/null || true
+}
+
+poweroff_vm() {
+	prlctl stop "$CUR_VM" --kill 2>/dev/null || true
+}
+
+delete_vm() {
+	poweroff_vm
+	prlctl delete "$CUR_VM" || true
+	exit 0
+}
+
+interrupt_vm() {
+	exit 1
+}
+
+trap interrupt_vm INT
+
+if ! prlctl status "$CUR_VM" 2>/dev/null 1>/dev/null
+then
+	if ! prlctl status "$BASE_TEMPLATE" 2>/dev/null 1>/dev/null
+	then
+		echo "VM: Creating $BASE_TEMPLATE..."
+		prlctl clone "$BASE_VM" --name "$BASE_TEMPLATE" --template --linked
+	fi
+
+	echo "VM: Bootstraping new $BASE_VM..."
+	prlctl create "$CUR_VM" --ostemplate "$BASE_TEMPLATE"
+	trap delete_vm EXIT
+	prlctl start "$CUR_VM"
+	wait_for_vm
+	echo "VM: Waiting 20s for machine boot..."
+	sleep 20s
+	prlctl snapshot "$CUR_VM" --name "$CUR_SNAPSHOT"
+	trap poweroff_vm EXIT
+else
+	SNAPSHOT_ID=$(prlctl snapshot-list "$CUR_VM" | grep " \*" | cut -d '*' -f 2)
+	echo "VM: Restoring state of $CUR_VM ($SNAPSHOT_ID)...."
+	prlctl snapshot-switch "$CUR_VM" --id "$SNAPSHOT_ID"
+	if prlctl status "$CUR_VM" | grep -q "stopped$"
+	then
+		prlctl start "$CUR_VM"
+	fi
+	trap poweroff_vm EXIT
+	wait_for_vm
+fi
+
+get_ip_addr() {
+    for i in $(seq 1 10)
+    do
+        IP=$(prlctl exec $CUR_VM "ipconfig getifaddr en0")
+        [[ -n "$IP" ]] && return 0
+        echo "Waiting for IP ($i)..."
+        sleep 3s
+    done
+    return 1
+}
+
+wait_for_ssh() {
+	for i in $(seq 1 10)
+	do
+		$SSH_COMMAND $SSH_LOGIN exit 0 1>/dev/null 2>/dev/null && return 0
+		echo "Waiting for SSH ($i)..."
+		sleep 3s
+	done
+	return 1
+}
+
+IP=""
+get_ip_addr
+PORT="22"
+SSH_COMMAND="sshpass -p travis ssh -t -p $PORT -o ConnectionAttempts=10 -o ConnectTimeout=10 -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no"
+SSH_LOGIN="travis@$IP"
+
+echo "Waiting for container boot-up: $IP:$PORT..."
+wait_for_ssh
+
+if [[ "$CI_REPO_SLUG" != "" ]]; then
+	echo "Copying sources..."
+	$SSH_COMMAND $SSH_LOGIN mkdir -p "build/$CI_REPO_SLUG"
+	rsync -a -e "$SSH_COMMAND" . "$SSH_LOGIN:build/$CI_REPO_SLUG"
+fi
+
+echo "Executing build script..."
+$SSH_COMMAND $SSH_LOGIN bash -c "$(cat "$1")"
