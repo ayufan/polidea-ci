@@ -20,6 +20,9 @@ module Polidea
         end
       end
 
+      class_option :file, :aliases => :f, :type => :string, :default => '.travis.yml'
+      class_option :branch, :aliases => :b, :type => :string, :banner => 'BRANCH'
+
       desc 'lint', 'Do verify build process'
       def lint
         parameters
@@ -31,20 +34,33 @@ module Polidea
 
         puts('Build variants:')
         matrix_entries.each do |matrix_entry|
-          puts("#{matrix_key(matrix_entry)}: #{matrix_attributes(matrix_entry)}")
+          puts("#{matrix_entries.index(matrix_entry)}\t#{matrix_key(matrix_entry)}\t#{matrix_attributes(matrix_entry)}")
         end
       end
 
-      desc 'config', 'Show config for variant'
+      desc 'config [VARIANT]', 'Show config for variant'
       def config(variant)
+        fail('branch constraint not met') unless check_branch_constraint
+
         matrix_entry = find_matrix_build_by_key(variant)
 
         puts(matrix_build_config(matrix_entry).to_yaml)
       end
 
-      desc 'build', 'Build specific variant'
-      option :p, :type => :boolean
+      desc 'build [VARIANT...]', 'Build specific variant'
+      option :print, :aliases => :p, :type => :boolean, :default => false
+      option :version, :aliases => :V, :type => :string, :banner => '1.0.0rc1', :default => '0.0'
+      option :build_number, :aliases => :N, :type => :numeric, :banner => 'BUILD_NUMBER', :default => '1'
+      option :tag, :aliases => :T, :type => :string, :banner => 'TAG', :default => 'project_tag'
       def build(*variants)
+        fail('branch constraint not met') unless check_branch_constraint
+
+        if variants.include? 'all'
+          variants = matrix_entries.map do |matrix_entry|
+            matrix_key(matrix_entry)
+          end
+        end
+
         variants.each do |variant|
           matrix_entry = find_matrix_build_by_key(variant)
           build_config = matrix_build_config(matrix_entry)
@@ -60,13 +76,12 @@ module Polidea
       private
 
       def execute_build(build_config, script)
-        run_file = Tempfile.new("executor")
+        run_file = Tempfile.new('executor')
         run_file.chmod(0700)
         run_file.puts(script)
         run_file.close
 
         cmd = "#{runner_script} #{run_file.path}"
-        puts("Executing script: #{cmd}")
 
         env = {}
         env['CI_OS'] = build_config['os']
@@ -79,7 +94,7 @@ module Polidea
           puts('Build failed!')
         end
       rescue => e
-        # run_file.unlink if run_file
+        run_file.unlink if run_file
         throw e
       end
 
@@ -90,13 +105,22 @@ module Polidea
 
       def find_matrix_build_by_key(key)
         matrix_entries.each do |matrix_entry|
+          return matrix_entry if matrix_entries.index(matrix_entry).to_s == key
           return matrix_entry if matrix_key(matrix_entry) == key
         end
         fail("#{key}: no variant found")
       end
 
       def build_script(build_config)
-        data = {
+        data = travis_config(build_config)
+        data = data.deep_merge(ci_config[:travis_build]) if ci_config[:travis_build]
+
+        script = Travis::Build.script(data, logs: {build: true, state: false})
+        script.compile
+      end
+
+      def travis_config(build_config)
+        {
             urls: {
             },
             ssh_key: {
@@ -107,21 +131,21 @@ module Polidea
                 slug: remote_slug
             },
             source: {
-                id: 1,
-                number: 1
+                id: current_build_number,
+                number: options[:version]
             },
             job: {
                 id: 1,
-                number: '1.1',
+                number: current_build_number,
                 branch: current_branch,
                 commit: current_commit,
                 commit_range: "before_commit..#{current_commit}",
                 pull_request: false,
-                tag: 'project_build'
+                tag: options[:tag]
             },
             config: build_config,
-            skip_resolv_updates: false,
-            skip_etc_hosts_fix: false,
+            skip_resolv_updates: true,
+            skip_etc_hosts_fix: true,
             paranoid: false,
             hosts: {
                 apt_cache: false,
@@ -138,11 +162,6 @@ module Polidea
                 }
             }
         }
-
-        # data = data.deep_merge(ci_config[:travis_build].deep_symobilze_keys) if ci_config && ci_config[:travis_build]
-
-        script = Travis::Build.script(data, logs: {build: true, state: false})
-        script.compile
       end
 
       def matrix_build_config(matrix_entry)
@@ -161,7 +180,7 @@ module Polidea
 
         # workaround for broken matrix_entry.global
         inherited_env = parameters.env.global if parameters.env
-        matrix_build_config["env"] = [*matrix_env, *inherited_env].compact
+        matrix_build_config['env'] = [*matrix_env, *inherited_env].compact
 
         # use eval to convert back to simple represtentation
         eval(matrix_build_config.to_s)
@@ -171,13 +190,13 @@ module Polidea
         if matrix_entry.respond_to? :matrix_attributes
           eval(matrix_entry.matrix_attributes.to_s)
         else
-          {}
+          nil
         end
       end
 
       def matrix_key(matrix_entry)
         attributes = matrix_attributes(matrix_entry)
-        return 'default' if attributes.empty?
+        return 'default' unless attributes
         Digest::SHA1.hexdigest(attributes.to_s).to_s
       end
 
@@ -193,7 +212,13 @@ module Polidea
         end
       end
 
+      def current_build_number
+        @current_build_number ||= options[:build_number]
+        @current_build_number ||= 1
+      end
+
       def current_branch
+        @current_branch ||= options[:current_branch] if options[:current_branch]
         @current_branch ||= `git symbolic-ref --short HEAD`.strip
       end
 
@@ -206,7 +231,7 @@ module Polidea
       end
 
       def remote_slug
-        @remote_slug ||= remote_origin.split('/')[-2..-1].join('/').sub('.git', '').strip
+        @remote_slug ||= remote_origin.split(':').last.split('/')[-2..-1].join('/').sub('.git', '').strip
       end
 
       def ssh_key
@@ -231,6 +256,7 @@ module Polidea
 
       def ci_config
         @config ||= YAML.load('~/.polidea-ci.yml') if File.exist?('~/.polidea-ci.yml')
+        @config ||= {}
       end
 
       def runner_script
