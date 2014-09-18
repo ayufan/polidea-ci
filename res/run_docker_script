@@ -26,7 +26,7 @@ stop_docker() {
 }
 
 echo "Bootstraping new container for $IMAGE_TAG..."
-id=$(docker run -P -d "$IMAGE:$IMAGE_TAG" /sbin/init)
+id=$(docker run -P --privileged -d "$IMAGE:$IMAGE_TAG" /sbin/init)
 trap stop_docker EXIT
 echo "New container bootstrapped: $id."
 

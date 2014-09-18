@@ -210,6 +210,7 @@ module Polidea
         elsif parameters.branches.except
           false if parameters.branches.except.include? current_branch
         end
+        true
       end
 
       def current_build_number
